@@ -6,11 +6,12 @@ module Solver.SATSolver
   ) where
 
 import qualified Data.Set as S
-import           Control.Arrow (first)
+import           Control.Arrow (first, second)
 import           Control.Monad
 import           Data.Monoid
+import           Debug.Trace
 
-data Result = UNSAT | SAT [Int] deriving Show
+data Result = UNKNOWN | UNSAT | SAT [Int] deriving Show
 
 result :: Bool -> [Int] -> Result
 result False _ = UNSAT
@@ -26,39 +27,60 @@ solve :: Int -> [[Int]] -> Result
 solve _ = solveDPLL
 
 data ClauseSet a = ClauseSet { lits :: S.Set a, clauses :: S.Set (S.Set a) }
+  deriving (Show)
 
 solveDPLL = solveDPLL' . split
 
 split :: [[Int]] -> ClauseSet Int
-split cnf = uncurry ClauseSet $ first join $ S.partition ((==1).length) (S.fromList $ S.fromList <$> cnf)
+split cnf = propagate (setjoin pures) (ClauseSet S.empty clausez)
+  where (pures, clausez) = S.partition ((==1).length) (S.fromList $ S.fromList <$> cnf)
+
+setjoin :: Ord a => S.Set (S.Set a) -> S.Set a
+setjoin = S.fold S.union S.empty
 
 checkLits :: ClauseSet Int -> Result
-checkLits cnf = if S.null (clauses cnf) && consistent
-                   then SAT $ S.toList flat
-                   else UNSAT
+checkLits cnf = if S.null (clauses cnf) 
+                   then if consistent
+                           then SAT $ S.toList flat
+                           else UNSAT
+                   else UNKNOWN
    where flat = lits cnf
-         consistent = S.null $ uncurry S.intersection (S.partition (>0) flat)
+         consistent = S.null $ uncurry S.intersection $ second (S.map abs) (S.partition (>0) flat)
 
 solveDPLL' :: ClauseSet Int -> Result
-solveDPLL' cnf | SAT model <- checkLits cnf = SAT model
-solveDPLL' cnf | hasEmpty cnf = UNSAT
-  where hasEmpty c = or $ S.null <$> clauses c
-solveDPLL' cnf = solveDPLL' (S.insert lit newcnf) <> solveDPLL' (S.insert (negate lit) newcnf)
-  where newcnf = propagate (S.union (units cnf) (pures cnf)) cnf
+solveDPLL' cnf
+  | SAT model <- checkLits cnf
+  = SAT model
+  | UNSAT <- checkLits cnf
+  = UNSAT
+  | hasEmpty cnf
+  = UNSAT
+  | SAT model <- checkLits newcnf
+  = SAT model
+  | UNSAT <- checkLits newcnf
+  = UNSAT
+  | hasEmpty newcnf
+  = UNSAT
+  | otherwise
+  = solveDPLL' (propagate (S.singleton lit) newcnf) <>
+    solveDPLL' (propagate (S.singleton (negate lit)) newcnf)
+  where newcnf = traceShowId $ propagate (S.union (units cnf) (pures cnf)) cnf
         lit = somelit newcnf
         somelit = head . S.toList . head . S.toList . clauses
 
-        units = join . S.filter ((==1).length) . clauses
+        units = setjoin . S.filter ((==1).length) . clauses
 
-pures cnf = uncurry S.difference (S.partition (>0) (join $ clauses cnf))
+hasEmpty c = or $ S.map S.null (clauses c)
+pures cnf = uncurry S.difference (S.partition (>0) (setjoin $ clauses cnf))
 
 propagate :: S.Set Int -> ClauseSet Int -> ClauseSet Int
 propagate units cnf = foldr propagateOne cnf units
-  where propagateOne :: Int -> ClauseSet Int -> ClauseSet Int
-        propagateOne unit (ClauseSet ls cs) = ClauseSet (S.insert unit ls)
-                                                        (S.delete (negate unit) . S.delete unit <$> cs)
+  where
+  propagateOne :: Int -> ClauseSet Int -> ClauseSet Int
+  propagateOne unit (ClauseSet ls cs)
+    = ClauseSet (S.insert unit ls)
+                (S.map (S.delete (negate unit)) (S.filter (not . S.member unit) cs))
 
--- 
 -------------
 -- solveNaive
 -------------
